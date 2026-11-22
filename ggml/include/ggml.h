@@ -415,6 +415,14 @@ extern "C" {
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
         GGML_OP_TOP_K_MASK,
+        GGML_OP_INKLING_ATTN_RES,
+        GGML_OP_INKLING_L2_CLIP,
+        GGML_OP_INKLING_SHORT_CONV,
+        GGML_OP_INKLING_LOOP_CTRL_PRE,
+        GGML_OP_INKLING_LOOP_CTRL_POST,
+        GGML_OP_INKLING_LOOP_GATE_NORM,
+        GGML_OP_INKLING_MUL_SIGMOID,
+        GGML_OP_INKLING_MOE_FFN,
 
         GGML_OP_UNARY,
 
@@ -471,6 +479,7 @@ extern "C" {
         GGML_GLU_OP_GEGLU_ERF,
         GGML_GLU_OP_GEGLU_QUICK,
         GGML_GLU_OP_SWIGLU_CLAMP,
+        GGML_GLU_OP_SITU,
 
         GGML_GLU_OP_COUNT,
     };
@@ -1203,6 +1212,13 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b,
             float                 limit);
+
+    GGML_API struct ggml_tensor * ggml_situ(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            float                 beta,
+            float                 linear_beta);
 
     // normalize along rows
     GGML_API struct ggml_tensor * ggml_norm(
@@ -2517,6 +2533,83 @@ extern "C" {
             struct ggml_tensor  * score,
             struct ggml_tensor  * blocks,
             struct ggml_tensor  * extra);
+
+    // Inkling-2-Mini custom fused GPU ops (RTX 3090 sm_86)
+    GGML_API void ggml_flash_attn_ext_add_rel_bias(
+            struct ggml_tensor * a,
+            struct ggml_tensor * table,
+            struct ggml_tensor * k_pos,
+            struct ggml_tensor * q_pos);
+
+    GGML_API struct ggml_tensor * ggml_inkling_attn_res(
+            struct ggml_context  * ctx,
+            struct ggml_tensor   * query,
+            struct ggml_tensor   * post_norm_w,
+            struct ggml_tensor  ** states,
+            int32_t                n_states,
+            float                  eps);
+
+    GGML_API struct ggml_tensor * ggml_inkling_l2_clip(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * scale,
+            struct ggml_tensor  * tau,
+            float                 threshold);
+
+    GGML_API struct ggml_tensor * ggml_inkling_short_conv(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * history,
+            struct ggml_tensor  * weight,
+            struct ggml_tensor  * dynamic,
+            struct ggml_tensor  * state,
+            int32_t               n_seq_tokens,
+            int32_t               n_seqs,
+            int32_t               hist_chan_offset,
+            int32_t               state_head,
+            int32_t               state_size,
+            int32_t               n_rs_seq,
+            float                 inv_scale);
+
+    GGML_API struct ggml_tensor * ggml_inkling_loop_ctrl_pre(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * msg,
+            float                 eps);
+
+    GGML_API struct ggml_tensor * ggml_inkling_loop_ctrl_post(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * h,
+            struct ggml_tensor  * w_gain,
+            struct ggml_tensor  * w_forget,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * msg);
+
+    GGML_API struct ggml_tensor * ggml_inkling_loop_gate_norm(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * msg,
+            struct ggml_tensor  * gain_raw,
+            struct ggml_tensor  * forget_raw,
+            struct ggml_tensor  * norm_w,
+            float                 eps);
+
+    GGML_API struct ggml_tensor * ggml_inkling_mul_sigmoid(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * gate);
+
+    GGML_API struct ggml_tensor * ggml_inkling_moe_ffn(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * gate_up_w,
+            struct ggml_tensor  * down_w,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * weights,
+            struct ggml_tensor  * gate_up_s,
+            struct ggml_tensor  * down_s,
+            float                 beta,
+            float                 linear_beta);
 
     // custom operators
 

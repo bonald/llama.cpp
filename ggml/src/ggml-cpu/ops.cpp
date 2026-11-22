@@ -10512,6 +10512,34 @@ void ggml_compute_forward_glu(
             {
                 ggml_compute_forward_swiglu_clamp(params, dst);
             } break;
+        case GGML_GLU_OP_SITU:
+            {
+                const ggml_tensor * src0 = dst->src[0];
+                const ggml_tensor * src1 = dst->src[1];
+                GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+                const float beta = ggml_get_op_params_f32(dst, 2);
+                const float lb   = ggml_get_op_params_f32(dst, 3);
+                const int64_t nc = dst->ne[0];
+                const int64_t nr = ggml_nrows(dst);
+                const int ith = params->ith;
+                const int nth = params->nth;
+                const int64_t ir0 = (nr * ith) / nth;
+                const int64_t ir1 = (nr * (ith + 1)) / nth;
+                for (int64_t ir = ir0; ir < ir1; ++ir) {
+                    const float * g_p = (const float *) ((const char *) src0->data + ir * src0->nb[1]);
+                    const float * u_p = src1
+                        ? (const float *) ((const char *) src1->data + ir * src1->nb[1])
+                        : (g_p + nc);
+                    float * d_p = (float *) ((char *) dst->data + ir * dst->nb[1]);
+                    for (int64_t k = 0; k < nc; ++k) {
+                        const float g = g_p[k];
+                        const float u = u_p[k];
+                        const float sg = beta * tanhf(g / beta) / (1.0f + expf(-g));
+                        const float su = lb > 0.0f ? lb * tanhf(u / lb) : u;
+                        d_p[k] = sg * su;
+                    }
+                }
+            } break;
         default:
             {
                 GGML_ABORT("fatal error");

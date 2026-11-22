@@ -807,6 +807,10 @@ public:
     ggml_tensor * self_rel_pos     = nullptr; // I32 [n_kv,     n_batch]
     ggml_tensor * self_rel_pos_swa = nullptr; // I32 [n_kv_swa, n_batch]
 
+    // 1D KV cell positions for compact fused relative-position bias in FlashAttention
+    ggml_tensor * self_k_pos     = nullptr; // I32 [n_kv,     n_stream]
+    ggml_tensor * self_k_pos_swa = nullptr; // I32 [n_kv_swa, n_stream]
+
     const uint32_t extent;
     const uint32_t extent_swa;
 
@@ -1332,11 +1336,14 @@ struct llm_graph_context {
             ggml_tensor * kq_b,
             ggml_tensor * kq_mask,
             ggml_tensor * kv_rows, // [n_kv, n_stream], k and v are shared by the streams
-            ggml_tensor * sinks,   // [n_head_q]
+            ggml_tensor * sinks,   // [n_head_q] or [n_head_q, n_tokens] with rel_bias_table
             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                 int64_t   n_kv_max,
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+            ggml_tensor * rel_bias_table = nullptr,
+            ggml_tensor * rel_k_pos      = nullptr,
+            ggml_tensor * rel_q_pos      = nullptr) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 
@@ -1545,6 +1552,21 @@ struct llm_graph_context {
             ggml_tensor * v_cur, // [n_embd_head_v, n_head_v, n_tokens]
             ggml_tensor * kq_b,  // [n_kv, n_tokens/n_stream, n_head_q, n_stream]
             ggml_tensor * sinks, // [n_head_q]
+                  float   kq_scale,
+                    int   il) const;
+
+    // compact fused relative-position bias path for FlashAttention (keeps mask ne[2]==1 & GQA MMA)
+    ggml_tensor * build_attn_rel_compact(
+            llm_graph_input_mem_hybrid_iswa_rel * inp,
+            ggml_tensor * wo,
+            ggml_tensor * wo_b,
+            ggml_tensor * wo_s,
+            ggml_tensor * q_cur,
+            ggml_tensor * k_cur,
+            ggml_tensor * v_cur,
+            ggml_tensor * rel_bias_table, // [n_extent, n_head_q, n_tokens]
+            ggml_tensor * q_pos,          // [n_tokens] I32
+            ggml_tensor * sinks,          // [n_head_q, n_tokens]
                   float   kq_scale,
                     int   il) const;
 

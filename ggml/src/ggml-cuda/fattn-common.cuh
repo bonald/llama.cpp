@@ -18,6 +18,13 @@
 // The macro on the following line shifts it by a factor of 2**3=8, as was needed to fix https://github.com/ggml-org/llama.cpp/issues/18606 .
 #define FATTN_KQ_MAX_OFFSET (3.0f*0.6931f)
 
+struct fattn_rel_bias {
+    const float   * table;    // [n_extent, n_head, n_tokens] F32 (or nullptr)
+    const int32_t * k_pos;    // [n_kv, n_stream] I32
+    const int32_t * q_pos;    // [n_tokens] I32
+    int32_t         n_extent;
+};
+
 typedef void (* fattn_kernel_t)(
         const char * __restrict__ Q,
         const char * __restrict__ K,
@@ -40,7 +47,8 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int64_t nb32, const int64_t nb33);
+                            const int32_t nb31, const int64_t nb32, const int64_t nb33,
+        const fattn_rel_bias rel_bias);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -1309,6 +1317,14 @@ void launch_fattn(
 
     GGML_ASSERT(block_dim.x % warp_size == 0);
 
+    fattn_rel_bias rel_bias = { nullptr, nullptr, nullptr, 0 };
+    if (dst->src[6] != nullptr) {
+        rel_bias.table    = (const float   *) dst->src[6]->data;
+        rel_bias.k_pos    = (const int32_t *) dst->src[7]->data;
+        rel_bias.q_pos    = (const int32_t *) dst->src[8]->data;
+        rel_bias.n_extent = (int32_t) dst->src[6]->ne[0];
+    }
+
     ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num, block_dim, nbytes_shared, main_stream);
     ggml_cuda_kernel_launch(fattn_kernel, launch_params,
         (const char *) Q->data,
@@ -1324,7 +1340,8 @@ void launch_fattn(
         K->ne[0], n_kv, K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
+        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
+        rel_bias
     );
     CUDA_CHECK(cudaGetLastError());
 

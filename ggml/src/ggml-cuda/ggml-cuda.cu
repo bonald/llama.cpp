@@ -66,6 +66,7 @@
 #include "ggml-cuda/gla.cuh"
 #include "ggml-cuda/gated_delta_net.cuh"
 #include "ggml-cuda/dsv4-hc.cuh"
+#include "ggml-cuda/inkling2.cuh"
 #include "ggml-cuda/set.cuh"
 #include "ggml-cuda/set-rows.cuh"
 #include "ggml-cuda/pad_reflect_1d.cuh"
@@ -2957,6 +2958,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 case GGML_GLU_OP_SWIGLU_CLAMP:
                     ggml_cuda_op_swiglu_clamp(ctx, dst);
                     break;
+                case GGML_GLU_OP_SITU:
+                    ggml_cuda_op_situ(ctx, dst);
+                    break;
                 default:
                     return false;
             }
@@ -3134,6 +3138,30 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_DSV4_HC_POST:
             ggml_cuda_op_dsv4_hc_post(ctx, dst);
+            break;
+        case GGML_OP_INKLING_ATTN_RES:
+            ggml_cuda_op_inkling_attn_res(ctx, dst);
+            break;
+        case GGML_OP_INKLING_L2_CLIP:
+            ggml_cuda_op_inkling_l2_clip(ctx, dst);
+            break;
+        case GGML_OP_INKLING_SHORT_CONV:
+            ggml_cuda_op_inkling_short_conv(ctx, dst);
+            break;
+        case GGML_OP_INKLING_LOOP_CTRL_PRE:
+            ggml_cuda_op_inkling_loop_ctrl_pre(ctx, dst);
+            break;
+        case GGML_OP_INKLING_LOOP_CTRL_POST:
+            ggml_cuda_op_inkling_loop_ctrl_post(ctx, dst);
+            break;
+        case GGML_OP_INKLING_LOOP_GATE_NORM:
+            ggml_cuda_op_inkling_loop_gate_norm(ctx, dst);
+            break;
+        case GGML_OP_INKLING_MUL_SIGMOID:
+            ggml_cuda_op_inkling_mul_sigmoid(ctx, dst);
+            break;
+        case GGML_OP_INKLING_MOE_FFN:
+            ggml_cuda_op_inkling_moe_ffn(ctx, dst);
             break;
         case GGML_OP_RWKV_WKV7:
             ggml_cuda_op_rwkv_wkv7(ctx, dst);
@@ -6387,11 +6415,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 case GGML_GLU_OP_GEGLU_ERF:
                 case GGML_GLU_OP_GEGLU_QUICK:
                 case GGML_GLU_OP_SWIGLU_CLAMP:
+                case GGML_GLU_OP_SITU:
                     if (op->src[0]->type == GGML_TYPE_BF16 &&
-                            (ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_OAI || ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_CLAMP)) {
+                            (ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_OAI || ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_CLAMP || ggml_get_glu_op(op) == GGML_GLU_OP_SITU)) {
                         return false;
                     }
-                    if (op->src[0]->type == GGML_TYPE_F16 && ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_OAI) {
+                    if (op->src[0]->type == GGML_TYPE_F16 && (ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_OAI || ggml_get_glu_op(op) == GGML_GLU_OP_SITU)) {
                         return false;
                     }
                     return ggml_is_contiguous_1(op->src[0]);
@@ -6809,6 +6838,18 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
                 op->src[2]->type == GGML_TYPE_F32 && (op->src[3] == nullptr || op->src[3]->type == GGML_TYPE_F32) &&
                 op->type == GGML_TYPE_F32;
+        case GGML_OP_INKLING_ATTN_RES:
+        case GGML_OP_INKLING_L2_CLIP:
+        case GGML_OP_INKLING_SHORT_CONV:
+        case GGML_OP_INKLING_LOOP_CTRL_PRE:
+        case GGML_OP_INKLING_LOOP_CTRL_POST:
+        case GGML_OP_INKLING_LOOP_GATE_NORM:
+        case GGML_OP_INKLING_MUL_SIGMOID:
+            return op->type == GGML_TYPE_F32;
+        case GGML_OP_INKLING_MOE_FFN:
+            return op->type == GGML_TYPE_F32 &&
+                (op->src[1]->type == GGML_TYPE_NVFP4 || op->src[1]->type == GGML_TYPE_Q8_0) &&
+                (op->src[2]->type == GGML_TYPE_NVFP4 || op->src[2]->type == GGML_TYPE_Q8_0);
         case GGML_OP_FLASH_ATTN_EXT:
             return ggml_cuda_flash_attn_ext_supported(dev_ctx->device, op);
         case GGML_OP_CROSS_ENTROPY_LOSS:

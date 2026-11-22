@@ -40,7 +40,8 @@ static __global__ void flash_attn_ext_vec(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int64_t nb32, const int64_t nb33) {
+                            const int32_t nb31, const int64_t nb32, const int64_t nb33,
+        const fattn_rel_bias rel_bias) {
     ggml_cuda_pdl_lc();
 #ifdef FLASH_ATTN_AVAILABLE
     const char * GGML_CUDA_RESTRICT Q        = Q_ptr;
@@ -304,6 +305,14 @@ static __global__ void flash_attn_ext_vec(
                     sum += slope*__half2float(maskh[j*ne11 + i_KQ]);
                 }
 
+                if (rel_bias.table && (ncols == 1 || ic0 + j < int(ne01.z)) && k_VKQ_0 + i_KQ < ne11) {
+                    const int q_tok = sequence * int(ne01.z) + ic0 + j;
+                    const uint32_t dist = uint32_t(__ldg(rel_bias.q_pos + q_tok) - __ldg(rel_bias.k_pos + int64_t(sequence)*ne11 + k_VKQ_0 + i_KQ));
+                    if (dist < uint32_t(rel_bias.n_extent)) {
+                        sum += __ldg(rel_bias.table + (int64_t(q_tok)*ne02 + head)*rel_bias.n_extent + dist);
+                    }
+                }
+
                 KQ_max_new[j] = fmaxf(KQ_max_new[j], sum + FATTN_KQ_MAX_OFFSET);
 
                 if ((nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ) == uint32_t(i_KQ_0)) {
@@ -402,8 +411,6 @@ static __global__ void flash_attn_ext_vec(
     }
 
     if (sinks && blockIdx.y == 0) {
-        const float sink = ((const float *) sinks)[head];
-
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
             const int j = j0 + threadIdx.y;
@@ -411,6 +418,11 @@ static __global__ void flash_attn_ext_vec(
             if (j0 + nwarps > ncols && j >= ncols) {
                 break;
             }
+
+            const int q_tok = sequence * int(ne01.z) + min(ic0 + j, int(ne01.z) - 1);
+            const float sink = rel_bias.table
+                ? ((const float *) sinks)[int64_t(q_tok)*ne02 + head]
+                : ((const float *) sinks)[head];
 
             const float kqmax_new_j = fmaxf(sink, KQ_max[j]);
             const float KQ_max_scale = expf(KQ_max[j] - kqmax_new_j);
@@ -545,7 +557,8 @@ static __global__ void flash_attn_ext_vec(
               nb11, nb12, nb13,
               nb21, nb22, nb23,
               ne31, ne32, ne33,
-              nb31, nb32, nb33);
+              nb31, nb32, nb33,
+              rel_bias);
     NO_DEVICE_CODE;
 #endif // FLASH_ATTN_AVAILABLE
 }

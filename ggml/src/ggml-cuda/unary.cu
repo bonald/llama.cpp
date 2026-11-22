@@ -555,6 +555,79 @@ void ggml_cuda_op_swiglu_clamp(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     }
 }
 
+// situ (Inkling-2-Mini vectorized float4 SiTU softcapped GLU)
+
+static __device__ __forceinline__ float ggml_cuda_op_situ_single(float g, float u, float beta, float inv_beta, float lb, float inv_lb) {
+    const float sg = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float su = (lb > 0.0f) ? (lb * tanhf(u * inv_lb)) : u;
+    return sg * su;
+}
+
+static __global__ void situ_f32_vec4_kernel(
+        const float * __restrict__ gate, const float * __restrict__ up, float * __restrict__ dst,
+        const int64_t total4, const int64_t n4, const int64_t o0_4, const int64_t o1_4,
+        const float beta, const float inv_beta, const float lb, const float inv_lb) {
+    const int64_t i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
+    if (i >= total4) return;
+    const int64_t row  = i / n4;
+    const int64_t col4 = i - row * n4;
+    const float4 g = reinterpret_cast<const float4 *>(gate)[row * o0_4 + col4];
+    const float4 u = reinterpret_cast<const float4 *>(up)[row * o1_4 + col4];
+    float4 out;
+    out.x = ggml_cuda_op_situ_single(g.x, u.x, beta, inv_beta, lb, inv_lb);
+    out.y = ggml_cuda_op_situ_single(g.y, u.y, beta, inv_beta, lb, inv_lb);
+    out.z = ggml_cuda_op_situ_single(g.z, u.z, beta, inv_beta, lb, inv_lb);
+    out.w = ggml_cuda_op_situ_single(g.w, u.w, beta, inv_beta, lb, inv_lb);
+    reinterpret_cast<float4 *>(dst)[i] = out;
+}
+
+static __global__ void situ_f32_scalar_kernel(
+        const float * __restrict__ gate, const float * __restrict__ up, float * __restrict__ dst,
+        const int64_t k, const int64_t n, const int64_t o0, const int64_t o1,
+        const float beta, const float inv_beta, const float lb, const float inv_lb) {
+    const int64_t i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
+    if (i >= k) return;
+    const int64_t row = i / n;
+    const int64_t col = i - row * n;
+    dst[i] = ggml_cuda_op_situ_single(gate[row * o0 + col], up[row * o1 + col], beta, inv_beta, lb, inv_lb);
+}
+
+void ggml_cuda_op_situ(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const int64_t src0_o = src0->nb[1] / sizeof(float);
+    const int64_t src1_o = (src1 ? src1->nb[1] : src0->nb[1]) / sizeof(float);
+    const int64_t nc = src1 ? src0->ne[0] : src0->ne[0] / 2;
+    const int32_t swapped = ggml_get_op_params_i32(dst, 1);
+    const float beta = ggml_get_op_params_f32(dst, 2);
+    const float lb   = ggml_get_op_params_f32(dst, 3);
+    const float inv_beta = 1.0f / beta;
+    const float inv_lb   = lb > 0.0f ? 1.0f / lb : 0.0f;
+
+    const float * g_p = (const float *) src0->data;
+    const float * u_p = (const float *) (src1 ? src1->data : src0->data);
+    if (!src1) {
+        g_p += swapped ? nc : 0;
+        u_p += swapped ? 0 : nc;
+    }
+    float * dst_p = (float *) dst->data;
+    cudaStream_t stream = ctx.stream();
+    const int64_t ne = ggml_nelements(dst);
+
+    const bool aligned4 = (nc % 4 == 0) && (src0_o % 4 == 0) && (src1_o % 4 == 0) &&
+                          (((uintptr_t) g_p & 15) == 0) && (((uintptr_t) u_p & 15) == 0) && (((uintptr_t) dst_p & 15) == 0);
+    if (aligned4) {
+        const int64_t total4 = ne / 4;
+        const int64_t blocks = (total4 + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
+        situ_f32_vec4_kernel<<<blocks, CUDA_GLU_BLOCK_SIZE, 0, stream>>>(
+            g_p, u_p, dst_p, total4, nc / 4, src0_o / 4, src1_o / 4, beta, inv_beta, lb, inv_lb);
+    } else {
+        const int64_t blocks = (ne + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
+        situ_f32_scalar_kernel<<<blocks, CUDA_GLU_BLOCK_SIZE, 0, stream>>>(
+            g_p, u_p, dst_p, ne, nc, src0_o, src1_o, beta, inv_beta, lb, inv_lb);
+    }
+}
+
 /* CUDA kernel + launcher for xIELU */
 
 template <typename T>

@@ -482,6 +482,17 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_SSM_SCAN:
             return ggml_get_op_params_i32(op, 0) == 1 || op->src[3]->ne[0] == 1;
+        case GGML_OP_FLASH_ATTN_EXT:
+            return op->src[6] == NULL;
+        case GGML_OP_INKLING_ATTN_RES:
+        case GGML_OP_INKLING_L2_CLIP:
+        case GGML_OP_INKLING_SHORT_CONV:
+        case GGML_OP_INKLING_LOOP_CTRL_PRE:
+        case GGML_OP_INKLING_LOOP_CTRL_POST:
+        case GGML_OP_INKLING_LOOP_GATE_NORM:
+        case GGML_OP_INKLING_MUL_SIGMOID:
+        case GGML_OP_INKLING_MOE_FFN:
+            return false;
         default:
             return true;
     }

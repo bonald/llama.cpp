@@ -912,6 +912,18 @@ static __device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t x) {
     const uint32_t bits = x * (x != 0x7F && x != 0xFF); // Convert NaN to 0.0f to match CPU implementation.
     const __hip_fp8_e4m3_fnuz xf = *reinterpret_cast<const __hip_fp8_e4m3_fnuz *>(&bits);
     return static_cast<float>(xf) / 2;
+#elif !defined(GGML_USE_HIP) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 890
+    // RTX 3090 (Ampere sm_86) fast 7-op branchless IEEE-754 E4M3/2 decoder.
+    // Bit-exact match to __nv_fp8_e4m3 / 2.0f with 0x7F/0xFF -> 0.0f, zero warp serialization.
+    const uint32_t mag  = x & 0x7Fu;
+    const uint32_t sign = uint32_t(x & 0x80u) << 24;
+    const bool is_sub   = (mag < 8u);
+    const uint32_t bits = is_sub ? (0x3C000000u | (mag << 20)) : ((mag << 20) + 0x3B800000u);
+    float val = __uint_as_float(bits) - (is_sub ? 0.0078125f : 0.0f);
+    if (mag == 0x7Fu) {
+        val = 0.0f;
+    }
+    return __uint_as_float(__float_as_uint(val) | sign);
 #else
 #if defined(FP8_AVAILABLE) && !defined(GGML_USE_HIP)
     const uint32_t bits = x * (x != 0x7F && x != 0xFF); // Convert NaN to 0.0f to match CPU implementation.

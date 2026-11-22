@@ -1099,6 +1099,14 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
     "TOP_K_MASK",
+    "INKLING_ATTN_RES",
+    "INKLING_L2_CLIP",
+    "INKLING_SHORT_CONV",
+    "INKLING_LOOP_CTRL_PRE",
+    "INKLING_LOOP_CTRL_POST",
+    "INKLING_LOOP_GATE_NORM",
+    "INKLING_MUL_SIGMOID",
+    "INKLING_MOE_FFN",
 
     "UNARY",
 
@@ -1118,7 +1126,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SLEEP",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1214,6 +1222,14 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
     "top_k_mask(mask, top_k, score, blocks, extra)",
+    "inkling_attn_res(q, states...)",
+    "inkling_l2_clip(x, scale, tau)",
+    "inkling_short_conv(x, hist, w, dyn, s)",
+    "inkling_loop_ctrl_pre(cur, msg)",
+    "inkling_loop_ctrl_post(h, wg, wf, cur, msg)",
+    "inkling_loop_gate_norm(cur, msg, g, f, nw)",
+    "inkling_mul_sigmoid(cur, gate)",
+    "inkling_moe_ffn(x, w_gu, w_d, ids, w)",
 
     "unary(x)",
 
@@ -1233,7 +1249,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sleep(x)",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1272,9 +1288,10 @@ static const char * GGML_GLU_OP_NAME[GGML_GLU_OP_COUNT] = {
     "GEGLU_ERF",
     "GEGLU_QUICK",
     "SWIGLU_CLAMP",
+    "SITU",
 };
 
-static_assert(GGML_GLU_OP_COUNT == 7, "GGML_GLU_OP_COUNT != 7");
+static_assert(GGML_GLU_OP_COUNT == 8, "GGML_GLU_OP_COUNT != 8");
 
 static_assert(sizeof(struct ggml_object)%GGML_MEM_ALIGN == 0, "ggml_object size must be a multiple of GGML_MEM_ALIGN");
 static_assert(sizeof(struct ggml_tensor)%GGML_MEM_ALIGN == 0, "ggml_tensor size must be a multiple of GGML_MEM_ALIGN");
@@ -3122,6 +3139,19 @@ struct ggml_tensor * ggml_swiglu_clamp(
         float                 limit) {
     struct ggml_tensor * result = ggml_glu_impl(ctx, a, b, GGML_GLU_OP_SWIGLU_CLAMP, false);
     ggml_set_op_params_f32(result, 3, limit);
+
+    return result;
+}
+
+struct ggml_tensor * ggml_situ(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        float                 beta,
+        float                 linear_beta) {
+    struct ggml_tensor * result = ggml_glu_impl(ctx, a, b, GGML_GLU_OP_SITU, false);
+    ggml_set_op_params_f32(result, 2, beta);
+    ggml_set_op_params_f32(result, 3, linear_beta);
 
     return result;
 }
@@ -6611,6 +6641,210 @@ struct ggml_tensor * ggml_top_k_mask(
     result->src[3] = blocks;
     result->src[4] = extra;
 
+    return result;
+}
+
+void ggml_flash_attn_ext_add_rel_bias(
+        struct ggml_tensor * a,
+        struct ggml_tensor * table,
+        struct ggml_tensor * k_pos,
+        struct ggml_tensor * q_pos) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(table && k_pos && q_pos);
+    GGML_ASSERT(table->type == GGML_TYPE_F32);
+    GGML_ASSERT(k_pos->type == GGML_TYPE_I32);
+    GGML_ASSERT(q_pos->type == GGML_TYPE_I32);
+    a->src[6] = table;
+    a->src[7] = k_pos;
+    a->src[8] = q_pos;
+}
+
+struct ggml_tensor * ggml_inkling_attn_res(
+        struct ggml_context  * ctx,
+        struct ggml_tensor   * query,
+        struct ggml_tensor   * post_norm_w,
+        struct ggml_tensor  ** states,
+        int32_t                n_states,
+        float                  eps) {
+    GGML_ASSERT(n_states >= 1 && n_states <= 8);
+    GGML_ASSERT(query->type == GGML_TYPE_F32);
+    const int64_t n_embd   = query->ne[0];
+    const int64_t n_q      = query->ne[1];
+    const int64_t n_tokens = states[0]->ne[1];
+    GGML_ASSERT(!post_norm_w || n_q == 1);
+    GGML_ASSERT(1 + n_states + (post_norm_w ? 1 : 0) <= GGML_MAX_SRC);
+
+    struct ggml_tensor * result = (n_q == 1)
+        ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens)
+        : ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_q, n_tokens);
+
+    ggml_set_op_params_i32(result, 0, n_states);
+    ggml_set_op_params_i32(result, 1, post_norm_w ? 1 : 0);
+    ggml_set_op_params_f32(result, 2, eps);
+
+    result->op = GGML_OP_INKLING_ATTN_RES;
+    result->src[0] = query;
+    for (int32_t i = 0; i < n_states; ++i) {
+        GGML_ASSERT(states[i]->type == GGML_TYPE_F32 && states[i]->ne[0] == n_embd && states[i]->ne[1] == n_tokens);
+        result->src[1 + i] = states[i];
+    }
+    if (post_norm_w) {
+        result->src[1 + n_states] = post_norm_w;
+    }
+    return result;
+}
+
+struct ggml_tensor * ggml_inkling_l2_clip(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * scale,
+        struct ggml_tensor  * tau,
+        float                 threshold) {
+    GGML_ASSERT(x->type == GGML_TYPE_F32);
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, x);
+
+    int32_t flags = (scale ? 1 : 0) | (tau ? 2 : 0);
+    ggml_set_op_params_i32(result, 0, flags);
+    ggml_set_op_params_f32(result, 1, threshold);
+
+    result->op = GGML_OP_INKLING_L2_CLIP;
+    result->src[0] = x;
+    int s = 1;
+    if (scale) result->src[s++] = scale;
+    if (tau)   result->src[s++] = tau;
+    return result;
+}
+
+struct ggml_tensor * ggml_inkling_short_conv(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * history,
+        struct ggml_tensor  * weight,
+        struct ggml_tensor  * dynamic,
+        struct ggml_tensor  * state,
+        int32_t               n_seq_tokens,
+        int32_t               n_seqs,
+        int32_t               hist_chan_offset,
+        int32_t               state_head,
+        int32_t               state_size,
+        int32_t               n_rs_seq,
+        float                 inv_scale) {
+    GGML_ASSERT(cur->type == GGML_TYPE_F32 && history->type == GGML_TYPE_F32 && weight->type == GGML_TYPE_F32);
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, cur);
+
+    ggml_set_op_params_i32(result, 0, n_seq_tokens);
+    ggml_set_op_params_i32(result, 1, n_seqs);
+    ggml_set_op_params_i32(result, 2, hist_chan_offset);
+    ggml_set_op_params_i32(result, 3, state_head);
+    ggml_set_op_params_i32(result, 4, state_size);
+    ggml_set_op_params_i32(result, 5, n_rs_seq);
+    ggml_set_op_params_i32(result, 6, dynamic ? 1 : 0);
+    ggml_set_op_params_f32(result, 7, inv_scale);
+
+    result->op = GGML_OP_INKLING_SHORT_CONV;
+    result->src[0] = cur;
+    result->src[1] = history;
+    result->src[2] = weight;
+    result->src[3] = state;
+    if (dynamic) {
+        result->src[4] = dynamic;
+    }
+    return result;
+}
+
+struct ggml_tensor * ggml_inkling_loop_ctrl_pre(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * msg,
+        float                 eps) {
+    GGML_ASSERT(cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32);
+    GGML_ASSERT(cur->ne[0] == msg->ne[0] && cur->ne[1] == msg->ne[1]);
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2 * cur->ne[0], cur->ne[1]);
+    ggml_set_op_params_f32(result, 0, eps);
+    result->op     = GGML_OP_INKLING_LOOP_CTRL_PRE;
+    result->src[0] = cur;
+    result->src[1] = msg;
+    return result;
+}
+
+struct ggml_tensor * ggml_inkling_loop_ctrl_post(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * h,
+        struct ggml_tensor  * w_gain,
+        struct ggml_tensor  * w_forget,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * msg) {
+    GGML_ASSERT(h->type == GGML_TYPE_F32 && w_gain->type == GGML_TYPE_F32 && w_forget->type == GGML_TYPE_F32);
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, cur);
+    result->op     = GGML_OP_INKLING_LOOP_CTRL_POST;
+    result->src[0] = h;
+    result->src[1] = w_gain;
+    result->src[2] = w_forget;
+    result->src[3] = cur;
+    result->src[4] = msg;
+    return result;
+}
+
+struct ggml_tensor * ggml_inkling_loop_gate_norm(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * msg,
+        struct ggml_tensor  * gain_raw,
+        struct ggml_tensor  * forget_raw,
+        struct ggml_tensor  * norm_w,
+        float                 eps) {
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, cur);
+    ggml_set_op_params_i32(result, 0, norm_w ? 1 : 0);
+    ggml_set_op_params_f32(result, 1, eps);
+    result->op     = GGML_OP_INKLING_LOOP_GATE_NORM;
+    result->src[0] = cur;
+    result->src[1] = msg;
+    result->src[2] = gain_raw;
+    result->src[3] = forget_raw;
+    if (norm_w) {
+        result->src[4] = norm_w;
+    }
+    return result;
+}
+
+struct ggml_tensor * ggml_inkling_mul_sigmoid(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * gate) {
+    GGML_ASSERT(cur->type == GGML_TYPE_F32 && gate->type == GGML_TYPE_F32);
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, cur);
+    result->op     = GGML_OP_INKLING_MUL_SIGMOID;
+    result->src[0] = cur;
+    result->src[1] = gate;
+    return result;
+}
+
+struct ggml_tensor * ggml_inkling_moe_ffn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * gate_up_w,
+        struct ggml_tensor  * down_w,
+        struct ggml_tensor  * ids,
+        struct ggml_tensor  * weights,
+        struct ggml_tensor  * gate_up_s,
+        struct ggml_tensor  * down_s,
+        float                 beta,
+        float                 linear_beta) {
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && ids->type == GGML_TYPE_I32 && weights->type == GGML_TYPE_F32);
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, down_w->ne[1], x->ne[1]);
+    int32_t flags = (gate_up_s ? 1 : 0) | (down_s ? 2 : 0);
+    ggml_set_op_params_i32(result, 0, flags);
+    ggml_set_op_params_f32(result, 1, beta);
+    ggml_set_op_params_f32(result, 2, linear_beta);
+    result->op     = GGML_OP_INKLING_MOE_FFN;
+    result->src[0] = x;
+    result->src[1] = gate_up_w;
+    result->src[2] = down_w;
+    result->src[3] = ids;
+    result->src[4] = weights;
+    int s = 5;
+    if (gate_up_s) result->src[s++] = gate_up_s;
+    if (down_s)    result->src[s++] = down_s;
     return result;
 }
 

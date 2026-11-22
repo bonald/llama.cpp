@@ -2147,6 +2147,17 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_top_k_mask(params, tensor);
             } break;
+        case GGML_OP_INKLING_ATTN_RES:
+        case GGML_OP_INKLING_L2_CLIP:
+        case GGML_OP_INKLING_SHORT_CONV:
+        case GGML_OP_INKLING_LOOP_CTRL_PRE:
+        case GGML_OP_INKLING_LOOP_CTRL_POST:
+        case GGML_OP_INKLING_LOOP_GATE_NORM:
+        case GGML_OP_INKLING_MUL_SIGMOID:
+        case GGML_OP_INKLING_MOE_FFN:
+            {
+                GGML_ABORT("Inkling custom ops are GPU-only");
+            } break;
         case GGML_OP_MAP_CUSTOM1:
             {
                 ggml_compute_forward_map_custom1(params, tensor);
@@ -2330,6 +2341,14 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_DSV4_HC_PRE:
         case GGML_OP_DSV4_HC_POST:
         case GGML_OP_TOP_K_MASK:
+        case GGML_OP_INKLING_ATTN_RES:
+        case GGML_OP_INKLING_L2_CLIP:
+        case GGML_OP_INKLING_SHORT_CONV:
+        case GGML_OP_INKLING_LOOP_CTRL_PRE:
+        case GGML_OP_INKLING_LOOP_CTRL_POST:
+        case GGML_OP_INKLING_LOOP_GATE_NORM:
+        case GGML_OP_INKLING_MUL_SIGMOID:
+        case GGML_OP_INKLING_MOE_FFN:
             {
                 n_tasks = n_threads;
             } break;
@@ -2384,6 +2403,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 case GGML_GLU_OP_GEGLU_ERF:
                 case GGML_GLU_OP_GEGLU_QUICK:
                 case GGML_GLU_OP_SWIGLU_CLAMP:
+                case GGML_GLU_OP_SITU:
                     {
                         n_tasks = n_threads;
                     } break;
